@@ -29,7 +29,7 @@ oracle. The reference should:
 
 1. Accept `A: &[bf16]` (M×K, row-major), `B: &[bf16]` (K×N, row-major), and
    accumulate into `C: &mut [f32]` (M×N, row-major).
-2. Be a straightforward triple-loop `i, j, k` with `f32` accumulators.
+2. Use tiles to reduce cache invalidation.
 3. Be tested with small random matrices against an f32 reference to establish an
    acceptable error bound (BF16 has ~0.4% relative error).
 
