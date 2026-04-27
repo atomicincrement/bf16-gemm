@@ -1,4 +1,4 @@
-use bf16_gemm::{gemm_avx512_opt_a, gemm_bf16_ref};
+use bf16_gemm::{txgemm, txgemm_ref};
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use half::bf16;
 
@@ -6,7 +6,7 @@ const M: usize = 1024;
 const N: usize = 1024;
 const K: usize = 1024;
 
-// Minimal LCG — same as in the unit tests, no extra deps.
+// Minimal LCG — no extra deps.
 fn lcg(state: &mut u64) -> f32 {
     *state = state
         .wrapping_mul(6364136223846793005)
@@ -21,7 +21,8 @@ fn make_bf16(n: usize, seed: u64) -> Vec<bf16> {
 }
 
 fn bench_gemm(c: &mut Criterion) {
-    let a = make_bf16(M * K, 1);
+    // A is K×M (transposed storage), B is K×N.
+    let a = make_bf16(K * M, 1);
     let b = make_bf16(K * N, 2);
 
     // 2 * M * N * K flops (one multiply + one add per element of the dot product)
@@ -34,9 +35,8 @@ fn bench_gemm(c: &mut Criterion) {
     group.bench_function("reference", |bencher| {
         let mut c_out = vec![0.0f32; M * N];
         bencher.iter(|| {
-            // Zero C each iteration so we measure a fresh GEMM, not accumulation.
             c_out.fill(0.0);
-            gemm_bf16_ref(
+            txgemm_ref(
                 black_box(&a),
                 black_box(&b),
                 black_box(&mut c_out),
@@ -45,11 +45,11 @@ fn bench_gemm(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("avx512_opt_a", |bencher| {
+    group.bench_function("blis_4x4", |bencher| {
         let mut c_out = vec![0.0f32; M * N];
         bencher.iter(|| {
             c_out.fill(0.0);
-            gemm_avx512_opt_a(
+            txgemm(
                 black_box(&a),
                 black_box(&b),
                 black_box(&mut c_out),
