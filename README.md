@@ -1,6 +1,6 @@
 # BF16-GEMM: Optimized Matrix Multiplication for AVX-512BF16
 
-A high-performance General Matrix Multiply (GEMM) implementation targeting x86-64 processors with AVX-512F and AVX-512BF16 instruction support. Achieves **347.69 GFLOPs** on 1024×1024×1024 matrices.
+A high-performance General Matrix Multiply (GEMM) implementation targeting x86-64 processors with AVX-512F and AVX-512BF16 instruction support. Achieves **347.69 GFLOPs** on 1024×1024×1024 matrices on a single thread or **5,563.04 GFLOPs** on my 16 core mini-PC.
 
 This is just a POC and so only supports high-end x86-64 CPUs.
 
@@ -9,6 +9,9 @@ The output is currently f32, but we could also quantise the result.
 
 When building LLMs, it would probably be wise to transpose the weight matrices to
 avoid permutes and broadcasts.
+
+It is also possible to double the performance by using u8 and i8, but this is out of scope
+for this POC.
 
 ## Quick Start
 
