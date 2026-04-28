@@ -2,6 +2,8 @@
 
 A high-performance General Matrix Multiply (GEMM) implementation targeting x86-64 processors with AVX-512F and AVX-512BF16 instruction support. Achieves **347.69 GFLOPs** on 1024×1024×1024 matrices.
 
+This is just a POC and so only supports high-end x86-64 CPUs.
+
 ## Quick Start
 
 ### Build
@@ -73,6 +75,7 @@ This eliminates loop overhead and enables better instruction scheduling.
 ### Supported Processors
 - **Intel**: 3rd Gen Xeon Scalable (Ice Lake), 4th Gen Xeon Scalable (Sapphire Rapids)
 - **AMD**: EPYC 7004 series (Bergamo) with AVX-512F and AVX-512BF16 support
+- **AMD** 9955HX, inexpensive mini PC with 16 cores.
 
 ### Minimum Requirements
 - x86-64 architecture
