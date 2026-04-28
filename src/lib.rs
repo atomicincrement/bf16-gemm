@@ -78,6 +78,66 @@ pub fn bf16_dot_product(a: &[bf16], b: &[bf16]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x.to_f32() * y.to_f32()).sum()
 }
 
+/// Compute a single TILE_I × TILE_J output tile using the k-loop.
+/// Called for each tile position (ii, jj) in the main gemm_bf16 function.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bf16")]
+unsafe fn gemm_bf16_kernel(
+    ii: usize,
+    jj: usize,
+    k: usize,
+    alpha: f32,
+    a: &[bf16],
+    lda: usize,
+    b: &[bf16],
+    ldb: usize,
+    beta: f32,
+    c: &mut [f32],
+    ldc: usize,
+) {
+    use std::arch::x86_64::*;
+    use std::mem::transmute;
+    
+    const TILE_I: usize = 4;
+    const TILE_J: usize = 4;
+    
+    // Initialize accumulators for the TILE_I × TILE_J tile
+    let mut accumulators = [[_mm512_setzero_ps(); TILE_J]; TILE_I];
+    
+    // Outer loop over k (in chunks of 32)
+    let mut idx = 0;
+    while idx + 32 <= k {
+        // Inner loops over j and i in the tile
+        for jj_local in 0..TILE_J {
+            for ii_local in 0..TILE_I {
+                let i = ii + ii_local;
+                let j = jj + jj_local;
+                
+                let a_ptr = a.as_ptr().add(i * lda + idx);
+                let b_ptr = b.as_ptr().add(j * ldb + idx);
+                
+                let a_data: __m512bh = transmute(_mm512_loadu_si512(a_ptr as *const __m512i));
+                let b_data: __m512bh = transmute(_mm512_loadu_si512(b_ptr as *const __m512i));
+                
+                accumulators[ii_local][jj_local] = _mm512_dpbf16_ps(accumulators[ii_local][jj_local], a_data, b_data);
+            }
+        }
+        
+        idx += 32;
+    }
+    
+    // Write back results
+    for jj_local in 0..TILE_J {
+        for ii_local in 0..TILE_I {
+            let i = ii + ii_local;
+            let j = jj + jj_local;
+            let dot = _mm512_reduce_add_ps(accumulators[ii_local][jj_local]);
+            let c_idx = i + j * ldc;
+            c[c_idx] = alpha * dot + beta * c[c_idx];
+        }
+    }
+}
+
 /// General matrix multiply: C = alpha * A^T * B + beta * C
 ///
 /// Currently only supports trans_a='T' and trans_b='N'.
@@ -105,9 +165,6 @@ pub unsafe fn gemm_bf16(
     c: &mut [f32],
     ldc: usize,
 ) {
-    use std::arch::x86_64::*;
-    use std::mem::transmute;
-    
     assert!(k % 32 == 0, "k must be a multiple of 32");
     assert!(m % 4 == 0, "m must be a multiple of 4");
     assert!(n % 4 == 0, "n must be a multiple of 4");
@@ -120,46 +177,53 @@ pub unsafe fn gemm_bf16(
     while jj < n {
         let mut ii = 0;
         while ii < m {
-            // Initialize accumulators for the TILE_I × TILE_J tile
-            let mut accumulators = [[_mm512_setzero_ps(); TILE_J]; TILE_I];
-            
-            // Outer loop over k (in chunks of 32)
-            let mut idx = 0;
-            while idx + 32 <= k {
-                // Inner loops over j and i in the tile
-                for jj_local in 0..TILE_J {
-                    for ii_local in 0..TILE_I {
-                        let i = ii + ii_local;
-                        let j = jj + jj_local;
-                        
-                        let a_ptr = a.as_ptr().add(i * lda + idx);
-                        let b_ptr = b.as_ptr().add(j * ldb + idx);
-                        
-                        let a_data: __m512bh = transmute(_mm512_loadu_si512(a_ptr as *const __m512i));
-                        let b_data: __m512bh = transmute(_mm512_loadu_si512(b_ptr as *const __m512i));
-                        
-                        accumulators[ii_local][jj_local] = _mm512_dpbf16_ps(accumulators[ii_local][jj_local], a_data, b_data);
-                    }
-                }
-                
-                idx += 32;
-            }
-            
-            // Write back results
-            for jj_local in 0..TILE_J {
-                for ii_local in 0..TILE_I {
-                    let i = ii + ii_local;
-                    let j = jj + jj_local;
-                    let dot = _mm512_reduce_add_ps(accumulators[ii_local][jj_local]);
-                    let c_idx = i + j * ldc;
-                    c[c_idx] = alpha * dot + beta * c[c_idx];
-                }
-            }
-            
+            gemm_bf16_kernel(ii, jj, k, alpha, a, lda, b, ldb, beta, c, ldc);
             ii += TILE_I;
         }
-        
         jj += TILE_J;
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn gemm_bf16_kernel(
+    ii: usize,
+    jj: usize,
+    k: usize,
+    alpha: f32,
+    a: &[bf16],
+    lda: usize,
+    b: &[bf16],
+    ldb: usize,
+    beta: f32,
+    c: &mut [f32],
+    ldc: usize,
+) {
+    const TILE_I: usize = 4;
+    const TILE_J: usize = 4;
+    
+    // Initialize accumulators for the TILE_I × TILE_J tile
+    let mut accumulators = [[0.0f32; TILE_J]; TILE_I];
+    
+    // Outer loop over k
+    for idx in 0..k {
+        // Inner loops over j and i in the tile
+        for jj_local in 0..TILE_J {
+            for ii_local in 0..TILE_I {
+                let i = ii + ii_local;
+                let j = jj + jj_local;
+                accumulators[ii_local][jj_local] += a[i * lda + idx].to_f32() * b[j * ldb + idx].to_f32();
+            }
+        }
+    }
+    
+    // Write back results
+    for jj_local in 0..TILE_J {
+        for ii_local in 0..TILE_I {
+            let i = ii + ii_local;
+            let j = jj + jj_local;
+            let c_idx = i + j * ldc;
+            c[c_idx] = alpha * accumulators[ii_local][jj_local] + beta * c[c_idx];
+        }
     }
 }
 
@@ -187,34 +251,9 @@ pub fn gemm_bf16(
     while jj < n {
         let mut ii = 0;
         while ii < m {
-            // Initialize accumulators for the TILE_I × TILE_J tile
-            let mut accumulators = [[0.0f32; TILE_J]; TILE_I];
-            
-            // Outer loop over k
-            for idx in 0..k {
-                // Inner loops over j and i in the tile
-                for jj_local in 0..TILE_J {
-                    for ii_local in 0..TILE_I {
-                        let i = ii + ii_local;
-                        let j = jj + jj_local;
-                        accumulators[ii_local][jj_local] += a[i * lda + idx].to_f32() * b[j * ldb + idx].to_f32();
-                    }
-                }
-            }
-            
-            // Write back results
-            for jj_local in 0..TILE_J {
-                for ii_local in 0..TILE_I {
-                    let i = ii + ii_local;
-                    let j = jj + jj_local;
-                    let c_idx = i + j * ldc;
-                    c[c_idx] = alpha * accumulators[ii_local][jj_local] + beta * c[c_idx];
-                }
-            }
-            
+            gemm_bf16_kernel(ii, jj, k, alpha, a, lda, b, ldb, beta, c, ldc);
             ii += TILE_I;
         }
-        
         jj += TILE_J;
     }
 }
