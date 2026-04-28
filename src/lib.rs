@@ -120,17 +120,17 @@ pub unsafe fn gemm_bf16(
     while jj < n {
         let mut ii = 0;
         while ii < m {
-            // Process TILE_I × TILE_J tile
-            for j in jj..jj + TILE_J {
-                // Initialize accumulators for the TILE_I i values in this tile
-                let mut accumulators = [_mm512_setzero_ps(); TILE_I];
-                
-                // Outer loop over k (in chunks of 32)
-                let mut idx = 0;
-                while idx + 32 <= k {
-                    // Inner loop over i in the tile
+            // Initialize accumulators for the TILE_I × TILE_J tile
+            let mut accumulators = [[_mm512_setzero_ps(); TILE_J]; TILE_I];
+            
+            // Outer loop over k (in chunks of 32)
+            let mut idx = 0;
+            while idx + 32 <= k {
+                // Inner loops over j and i in the tile
+                for jj_local in 0..TILE_J {
                     for ii_local in 0..TILE_I {
                         let i = ii + ii_local;
+                        let j = jj + jj_local;
                         
                         let a_ptr = a.as_ptr().add(i * lda + idx);
                         let b_ptr = b.as_ptr().add(j * ldb + idx);
@@ -138,16 +138,19 @@ pub unsafe fn gemm_bf16(
                         let a_data: __m512bh = transmute(_mm512_loadu_si512(a_ptr as *const __m512i));
                         let b_data: __m512bh = transmute(_mm512_loadu_si512(b_ptr as *const __m512i));
                         
-                        accumulators[ii_local] = _mm512_dpbf16_ps(accumulators[ii_local], a_data, b_data);
+                        accumulators[ii_local][jj_local] = _mm512_dpbf16_ps(accumulators[ii_local][jj_local], a_data, b_data);
                     }
-                    
-                    idx += 32;
                 }
                 
-                // Write back results
+                idx += 32;
+            }
+            
+            // Write back results
+            for jj_local in 0..TILE_J {
                 for ii_local in 0..TILE_I {
                     let i = ii + ii_local;
-                    let dot = _mm512_reduce_add_ps(accumulators[ii_local]);
+                    let j = jj + jj_local;
+                    let dot = _mm512_reduce_add_ps(accumulators[ii_local][jj_local]);
                     let c_idx = i + j * ldc;
                     c[c_idx] = alpha * dot + beta * c[c_idx];
                 }
@@ -184,24 +187,28 @@ pub fn gemm_bf16(
     while jj < n {
         let mut ii = 0;
         while ii < m {
-            for j in jj..jj + TILE_J {
-                // Initialize accumulators for the TILE_I i values in this tile
-                let mut accumulators = [0.0f32; TILE_I];
-                
-                // Outer loop over k
-                for idx in 0..k {
-                    // Inner loop over i in the tile
+            // Initialize accumulators for the TILE_I × TILE_J tile
+            let mut accumulators = [[0.0f32; TILE_J]; TILE_I];
+            
+            // Outer loop over k
+            for idx in 0..k {
+                // Inner loops over j and i in the tile
+                for jj_local in 0..TILE_J {
                     for ii_local in 0..TILE_I {
                         let i = ii + ii_local;
-                        accumulators[ii_local] += a[i * lda + idx].to_f32() * b[j * ldb + idx].to_f32();
+                        let j = jj + jj_local;
+                        accumulators[ii_local][jj_local] += a[i * lda + idx].to_f32() * b[j * ldb + idx].to_f32();
                     }
                 }
-                
-                // Write back results
+            }
+            
+            // Write back results
+            for jj_local in 0..TILE_J {
                 for ii_local in 0..TILE_I {
                     let i = ii + ii_local;
+                    let j = jj + jj_local;
                     let c_idx = i + j * ldc;
-                    c[c_idx] = alpha * accumulators[ii_local] + beta * c[c_idx];
+                    c[c_idx] = alpha * accumulators[ii_local][jj_local] + beta * c[c_idx];
                 }
             }
             

@@ -4,6 +4,10 @@ Investigate different ways of multiplying matrices using AVX512 BF16 extensions.
 
 The goal is to write a BF16 gemm in inline asm in a Rust function.
 
+## Agents
+
+Always build with --release
+
 ## Available BF16 Instructions on Zen5
 
 Zen5 supports the `AVX512_BF16` extension. The key instructions are:
