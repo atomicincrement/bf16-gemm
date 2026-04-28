@@ -4,6 +4,12 @@ A high-performance General Matrix Multiply (GEMM) implementation targeting x86-6
 
 This is just a POC and so only supports high-end x86-64 CPUs.
 
+This mutiplies two matrices in column major order, the first of which is transposed.
+The output is currently f32, but we could also quantise the result.
+
+When building LLMs, it would probably be wise to transpose the weight matrices to
+avoid permutes and broadcasts.
+
 ## Quick Start
 
 ### Build
