@@ -121,30 +121,32 @@ pub unsafe fn gemm_bf16(
         while ii < m {
             // Process 4×4 tile
             for j in jj..jj + TILE {
-                for i in ii..ii + TILE {
-                    // Extract column i of A^T
-                    let a_col = &a[i * lda .. i * lda + k];
-                    
-                    // Extract column j of B
-                    let b_col = &b[j * ldb .. j * ldb + k];
-                    
-                    // Inline dot product computation
-                    let mut accumulator = _mm512_setzero_ps();
-                    let mut idx = 0;
-                    while idx + 32 <= k {
-                        let a_ptr = a_col.as_ptr().add(idx);
-                        let b_ptr = b_col.as_ptr().add(idx);
+                // Initialize accumulators for the 4 i values in this tile
+                let mut accumulators = [_mm512_setzero_ps(); 4];
+                
+                // Outer loop over k (in chunks of 32)
+                let mut idx = 0;
+                while idx + 32 <= k {
+                    // Inner loop over i in the tile
+                    for ii_local in 0..TILE {
+                        let i = ii + ii_local;
+                        
+                        let a_ptr = a.as_ptr().add(i * lda + idx);
+                        let b_ptr = b.as_ptr().add(j * ldb + idx);
                         
                         let a_data: __m512bh = transmute(_mm512_loadu_si512(a_ptr as *const __m512i));
                         let b_data: __m512bh = transmute(_mm512_loadu_si512(b_ptr as *const __m512i));
                         
-                        accumulator = _mm512_dpbf16_ps(accumulator, a_data, b_data);
-                        
-                        idx += 32;
+                        accumulators[ii_local] = _mm512_dpbf16_ps(accumulators[ii_local], a_data, b_data);
                     }
-                    let dot = _mm512_reduce_add_ps(accumulator);
                     
-                    // Update C[i, j] = alpha * dot + beta * C[i, j]
+                    idx += 32;
+                }
+                
+                // Write back results
+                for ii_local in 0..TILE {
+                    let i = ii + ii_local;
+                    let dot = _mm512_reduce_add_ps(accumulators[ii_local]);
                     let c_idx = i + j * ldc;
                     c[c_idx] = alpha * dot + beta * c[c_idx];
                 }
@@ -181,16 +183,23 @@ pub fn gemm_bf16(
         let mut ii = 0;
         while ii < m {
             for j in jj..jj + TILE {
-                for i in ii..ii + TILE {
-                    let a_col = &a[i * lda .. i * lda + k];
-                    let b_col = &b[j * ldb .. j * ldb + k];
-                    
-                    // Inline dot product computation
-                    let dot: f32 = a_col.iter().zip(b_col.iter()).map(|(x, y)| x.to_f32() * y.to_f32()).sum();
-                    
-                    // Update C[i, j] = alpha * dot + beta * C[i, j]
+                // Initialize accumulators for the 4 i values in this tile
+                let mut accumulators = [0.0f32; 4];
+                
+                // Outer loop over k
+                for idx in 0..k {
+                    // Inner loop over i in the tile
+                    for ii_local in 0..TILE {
+                        let i = ii + ii_local;
+                        accumulators[ii_local] += a[i * lda + idx].to_f32() * b[j * ldb + idx].to_f32();
+                    }
+                }
+                
+                // Write back results
+                for ii_local in 0..TILE {
+                    let i = ii + ii_local;
                     let c_idx = i + j * ldc;
-                    c[c_idx] = alpha * dot + beta * c[c_idx];
+                    c[c_idx] = alpha * accumulators[ii_local] + beta * c[c_idx];
                 }
             }
             
