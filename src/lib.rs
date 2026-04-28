@@ -189,9 +189,9 @@ unsafe fn gemm_bf16_kernel(
 /// - B: k×n (untransposed), column-major, leading dimension ldb
 /// - C: m×n (result), column-major, leading dimension ldc
 /// 
-/// m and n must be multiples of 4 (TILE_I and TILE_J respectively).
+/// m and n must be multiples of 16 (SUPERTILE_I and SUPERTILE_J respectively).
 /// k must be a multiple of 32.
-/// Uses TILE_I × TILE_J tiling for improved cache coherence.
+/// Uses hierarchical tiling: SUPERTILE (16×16) containing 4×4 TILE blocks for improved cache coherence.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bf16")]
 pub unsafe fn gemm_bf16(
@@ -208,21 +208,32 @@ pub unsafe fn gemm_bf16(
     ldc: usize,
 ) {
     assert!(k % 32 == 0, "k must be a multiple of 32");
-    assert!(m % 4 == 0, "m must be a multiple of 4");
-    assert!(n % 4 == 0, "n must be a multiple of 4");
+    assert!(m % 16 == 0, "m must be a multiple of 16 (SUPERTILE_I)");
+    assert!(n % 16 == 0, "n must be a multiple of 16 (SUPERTILE_J)");
     
+    const SUPERTILE_I: usize = 16;
+    const SUPERTILE_J: usize = 16;
     const TILE_I: usize = 4;
     const TILE_J: usize = 4;
     
-    // Iterate over TILE_I × TILE_J tiles of output matrix C in column-major order
-    let mut jj = 0;
-    while jj < n {
-        let mut ii = 0;
-        while ii < m {
-            gemm_bf16_kernel(ii, jj, k, alpha, a, lda, b, ldb, beta, c, ldc);
-            ii += TILE_I;
+    // Iterate over SUPERTILE_J × SUPERTILE_I supertiles (column-major outer loop)
+    let mut jjj = 0;
+    while jjj < n {
+        let mut iii = 0;
+        while iii < m {
+            // Within supertile, iterate over TILE_J × TILE_I tiles
+            let mut jj = jjj;
+            while jj < (jjj + SUPERTILE_J) {
+                let mut ii = iii;
+                while ii < (iii + SUPERTILE_I) {
+                    gemm_bf16_kernel(ii, jj, k, alpha, a, lda, b, ldb, beta, c, ldc);
+                    ii += TILE_I;
+                }
+                jj += TILE_J;
+            }
+            iii += SUPERTILE_I;
         }
-        jj += TILE_J;
+        jjj += SUPERTILE_J;
     }
 }
 
@@ -367,16 +378,16 @@ mod tests {
     #[test]
     fn test_gemm_bf16_simple() {
         // Test C = alpha * A^T * B + beta * C
-        // A: 4×4 (transposed), B: 4×4, C: 4×4
-        let m = 4;
-        let n = 4;
+        // A: 16×16 (transposed), B: 16×16, C: 16×16 (multiple of 16 for supertiling)
+        let m = 16;
+        let n = 16;
         let k = 32; // Multiple of 32
         
         let mut a = vec![bf16::ZERO; m * k];
         let mut b = vec![bf16::ZERO; n * k];
         let mut c = vec![0.0f32; m * n];
         
-        // A^T in column-major: column i = [i+1, i+2, ...]
+        // A^T in column-major: column i has values set for first 2 k elements
         for i in 0..m {
             for idx in 0..k {
                 if idx < 2 {
