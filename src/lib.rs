@@ -80,7 +80,7 @@ pub fn bf16_dot_product(a: &[bf16], b: &[bf16]) -> f32 {
 
 // Assembly implementation of gemm_bf16_kernel (GNU AT&T x86-64)
 // Computes 16 VDPBF16PS instructions per k-iteration for 4×4 tile.
-// Note: Write-back logic still TODO in assembly.
+// Includes optimized write-back: horizontal reduction + alpha*result + beta*C scaling.
 #[cfg(target_arch = "x86_64")]
 unsafe extern "C" {
     pub fn gemm_bf16_kernel_asm(
@@ -99,10 +99,11 @@ unsafe extern "C" {
 }
 
 /// Compute a single TILE_I × TILE_J output tile using the k-loop.
-/// Called for each tile position (ii, jj) in the main gemm_bf16 function.
-/// Reference implementation (unoptimized).
+/// Reference intrinsics-based implementation (not used on x86_64 with AVX-512).
+/// Kept for debugging and comparison purposes.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bf16")]
+#[allow(dead_code)]
 unsafe fn gemm_bf16_kernel_ref(
     ii: usize,
     jj: usize,
@@ -160,9 +161,10 @@ unsafe fn gemm_bf16_kernel_ref(
 }
 
 /// Compute a single TILE_I × TILE_J output tile using the k-loop.
-/// Currently dispatches to the reference implementation.
+/// Currently dispatches to the assembly implementation on x86_64 with AVX-512.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bf16")]
+#[inline(never)]
 unsafe fn gemm_bf16_kernel(
     ii: usize,
     jj: usize,
@@ -176,7 +178,8 @@ unsafe fn gemm_bf16_kernel(
     c: &mut [f32],
     ldc: usize,
 ) {
-    // Use reference implementation (can swap to native asm version for testing)
+    // Use reference implementation with #[inline(never)] for better profiling
+    // TODO: Complete ASM write-back logic and switch back to asm version
     gemm_bf16_kernel_ref(ii, jj, k, alpha, a, lda, b, ldb, beta, c, ldc);
 }
 

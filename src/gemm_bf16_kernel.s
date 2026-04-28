@@ -138,9 +138,299 @@ gemm_bf16_kernel_asm:
     jmp .Lk_loop
     
 .Lk_done:
-    /* TODO: Horizontal reduction and write back
-     * For now, just return with accumulators in registers
-     */
+    /* Horizontal reduction and write back */
+    /* Accumulators: zmm0-3, zmm4-7, zmm10-13, zmm14-17 (4x4 tile) */
+    /* Recovered: alpha in xmm8, beta in xmm9 */
+    /* Available: r8-r11, r12=c, r13=ldc, rdi=ii, rsi=jj */
+    
+    /* Save c pointer and ldc */
+    mov %r12, %r14          /* save c pointer */
+    mov %r13, %r15          /* save ldc */
+    
+    /* For each accumulator, do horizontal sum and write back */
+    /* Macro: reduce zmm reg to scalar in xmm via vextractf64x4 + hsum */
+    
+    /* Process each of 16 accumulators (4x4 tile) */
+    /* ii_local=0, jj_local=0: zmm0 */
+    vextractf64x4 $1, %zmm0, %ymm19
+    vaddps %ymm19, %ymm0, %ymm0
+    vextractf32x4 $1, %ymm0, %xmm19
+    vaddps %xmm19, %xmm0, %xmm0
+    vhaddps %xmm0, %xmm0, %xmm0
+    vhaddps %xmm0, %xmm0, %xmm0
+    
+    /* Apply alpha * result + beta * C[0,0] */
+    mov %rdi, %r8
+    add %rsi, %r8
+    imul %r15, %r8
+    vmulss %xmm8, %xmm0, %xmm0         /* alpha * sum */
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19  /* beta * C[i,j] */
+    vaddss %xmm19, %xmm0, %xmm0
+    vmovss %xmm0, (%r14, %r8, 4)       /* write back */
+    
+    /* ii_local=1, jj_local=0: zmm1 */
+    vextractf64x4 $1, %zmm1, %ymm19
+    vaddps %ymm19, %ymm1, %ymm1
+    vextractf32x4 $1, %ymm1, %xmm19
+    vaddps %xmm19, %xmm1, %xmm1
+    vhaddps %xmm1, %xmm1, %xmm1
+    vhaddps %xmm1, %xmm1, %xmm1
+    
+    mov %rdi, %r8
+    inc %r8
+    add %rsi, %r8
+    imul %r15, %r8
+    vmulss %xmm8, %xmm1, %xmm1
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19
+    vaddss %xmm19, %xmm1, %xmm1
+    vmovss %xmm1, (%r14, %r8, 4)
+    
+    /* ii_local=2, jj_local=0: zmm2 */
+    vextractf64x4 $1, %zmm2, %ymm19
+    vaddps %ymm19, %ymm2, %ymm2
+    vextractf32x4 $1, %ymm2, %xmm19
+    vaddps %xmm19, %xmm2, %xmm2
+    vhaddps %xmm2, %xmm2, %xmm2
+    vhaddps %xmm2, %xmm2, %xmm2
+    
+    mov %rdi, %r8
+    add $2, %r8
+    add %rsi, %r8
+    imul %r15, %r8
+    vmulss %xmm8, %xmm2, %xmm2
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19
+    vaddss %xmm19, %xmm2, %xmm2
+    vmovss %xmm2, (%r14, %r8, 4)
+    
+    /* ii_local=3, jj_local=0: zmm3 */
+    vextractf64x4 $1, %zmm3, %ymm19
+    vaddps %ymm19, %ymm3, %ymm3
+    vextractf32x4 $1, %ymm3, %xmm19
+    vaddps %xmm19, %xmm3, %xmm3
+    vhaddps %xmm3, %xmm3, %xmm3
+    vhaddps %xmm3, %xmm3, %xmm3
+    
+    mov %rdi, %r8
+    add $3, %r8
+    add %rsi, %r8
+    imul %r15, %r8
+    vmulss %xmm8, %xmm3, %xmm3
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19
+    vaddss %xmm19, %xmm3, %xmm3
+    vmovss %xmm3, (%r14, %r8, 4)
+    
+    /* ii_local=0, jj_local=1: zmm4 */
+    vextractf64x4 $1, %zmm4, %ymm19
+    vaddps %ymm19, %ymm4, %ymm4
+    vextractf32x4 $1, %ymm4, %xmm19
+    vaddps %xmm19, %xmm4, %xmm4
+    vhaddps %xmm4, %xmm4, %xmm4
+    vhaddps %xmm4, %xmm4, %xmm4
+    
+    mov %rdi, %r8
+    add %rsi, %r8
+    inc %r8                             /* jj + 1 */
+    imul %r15, %r8
+    vmulss %xmm8, %xmm4, %xmm4
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19
+    vaddss %xmm19, %xmm4, %xmm4
+    vmovss %xmm4, (%r14, %r8, 4)
+    
+    /* ii_local=1, jj_local=1: zmm5 */
+    vextractf64x4 $1, %zmm5, %ymm19
+    vaddps %ymm19, %ymm5, %ymm5
+    vextractf32x4 $1, %ymm5, %xmm19
+    vaddps %xmm19, %xmm5, %xmm5
+    vhaddps %xmm5, %xmm5, %xmm5
+    vhaddps %xmm5, %xmm5, %xmm5
+    
+    mov %rdi, %r8
+    inc %r8
+    add %rsi, %r8
+    inc %r8                             /* jj + 1 */
+    imul %r15, %r8
+    vmulss %xmm8, %xmm5, %xmm5
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19
+    vaddss %xmm19, %xmm5, %xmm5
+    vmovss %xmm5, (%r14, %r8, 4)
+    
+    /* ii_local=2, jj_local=1: zmm6 */
+    vextractf64x4 $1, %zmm6, %ymm19
+    vaddps %ymm19, %ymm6, %ymm6
+    vextractf32x4 $1, %ymm6, %xmm19
+    vaddps %xmm19, %xmm6, %xmm6
+    vhaddps %xmm6, %xmm6, %xmm6
+    vhaddps %xmm6, %xmm6, %xmm6
+    
+    mov %rdi, %r8
+    add $2, %r8
+    add %rsi, %r8
+    inc %r8                             /* jj + 1 */
+    imul %r15, %r8
+    vmulss %xmm8, %xmm6, %xmm6
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19
+    vaddss %xmm19, %xmm6, %xmm6
+    vmovss %xmm6, (%r14, %r8, 4)
+    
+    /* ii_local=3, jj_local=1: zmm7 */
+    vextractf64x4 $1, %zmm7, %ymm19
+    vaddps %ymm19, %ymm7, %ymm7
+    vextractf32x4 $1, %ymm7, %xmm19
+    vaddps %xmm19, %xmm7, %xmm7
+    vhaddps %xmm7, %xmm7, %xmm7
+    vhaddps %xmm7, %xmm7, %xmm7
+    
+    mov %rdi, %r8
+    add $3, %r8
+    add %rsi, %r8
+    inc %r8                             /* jj + 1 */
+    imul %r15, %r8
+    vmulss %xmm8, %xmm7, %xmm7
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19
+    vaddss %xmm19, %xmm7, %xmm7
+    vmovss %xmm7, (%r14, %r8, 4)
+    
+    /* ii_local=0, jj_local=2: zmm10 */
+    vextractf64x4 $1, %zmm10, %ymm19
+    vaddps %ymm19, %ymm10, %ymm10
+    vextractf32x4 $1, %ymm10, %xmm19
+    vaddps %xmm19, %xmm10, %xmm10
+    vhaddps %xmm10, %xmm10, %xmm10
+    vhaddps %xmm10, %xmm10, %xmm10
+    
+    mov %rdi, %r8
+    add %rsi, %r8
+    add $2, %r8                         /* jj + 2 */
+    imul %r15, %r8
+    vmulss %xmm8, %xmm10, %xmm10
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19
+    vaddss %xmm19, %xmm10, %xmm10
+    vmovss %xmm10, (%r14, %r8, 4)
+    
+    /* ii_local=1, jj_local=2: zmm11 */
+    vextractf64x4 $1, %zmm11, %ymm19
+    vaddps %ymm19, %ymm11, %ymm11
+    vextractf32x4 $1, %ymm11, %xmm19
+    vaddps %xmm19, %xmm11, %xmm11
+    vhaddps %xmm11, %xmm11, %xmm11
+    vhaddps %xmm11, %xmm11, %xmm11
+    
+    mov %rdi, %r8
+    inc %r8
+    add %rsi, %r8
+    add $2, %r8                         /* jj + 2 */
+    imul %r15, %r8
+    vmulss %xmm8, %xmm11, %xmm11
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19
+    vaddss %xmm19, %xmm11, %xmm11
+    vmovss %xmm11, (%r14, %r8, 4)
+    
+    /* ii_local=2, jj_local=2: zmm12 */
+    vextractf64x4 $1, %zmm12, %ymm19
+    vaddps %ymm19, %ymm12, %ymm12
+    vextractf32x4 $1, %ymm12, %xmm19
+    vaddps %xmm19, %xmm12, %xmm12
+    vhaddps %xmm12, %xmm12, %xmm12
+    vhaddps %xmm12, %xmm12, %xmm12
+    
+    mov %rdi, %r8
+    add $2, %r8
+    add %rsi, %r8
+    add $2, %r8                         /* jj + 2 */
+    imul %r15, %r8
+    vmulss %xmm8, %xmm12, %xmm12
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19
+    vaddss %xmm19, %xmm12, %xmm12
+    vmovss %xmm12, (%r14, %r8, 4)
+    
+    /* ii_local=3, jj_local=2: zmm13 */
+    vextractf64x4 $1, %zmm13, %ymm19
+    vaddps %ymm19, %ymm13, %ymm13
+    vextractf32x4 $1, %ymm13, %xmm19
+    vaddps %xmm19, %xmm13, %xmm13
+    vhaddps %xmm13, %xmm13, %xmm13
+    vhaddps %xmm13, %xmm13, %xmm13
+    
+    mov %rdi, %r8
+    add $3, %r8
+    add %rsi, %r8
+    add $2, %r8                         /* jj + 2 */
+    imul %r15, %r8
+    vmulss %xmm8, %xmm13, %xmm13
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19
+    vaddss %xmm19, %xmm13, %xmm13
+    vmovss %xmm13, (%r14, %r8, 4)
+    
+    /* ii_local=0, jj_local=3: zmm14 */
+    vextractf64x4 $1, %zmm14, %ymm19
+    vaddps %ymm19, %ymm14, %ymm14
+    vextractf32x4 $1, %ymm14, %xmm19
+    vaddps %xmm19, %xmm14, %xmm14
+    vhaddps %xmm14, %xmm14, %xmm14
+    vhaddps %xmm14, %xmm14, %xmm14
+    
+    mov %rdi, %r8
+    add %rsi, %r8
+    add $3, %r8                         /* jj + 3 */
+    imul %r15, %r8
+    vmulss %xmm8, %xmm14, %xmm14
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19
+    vaddss %xmm19, %xmm14, %xmm14
+    vmovss %xmm14, (%r14, %r8, 4)
+    
+    /* ii_local=1, jj_local=3: zmm15 */
+    vextractf64x4 $1, %zmm15, %ymm19
+    vaddps %ymm19, %ymm15, %ymm15
+    vextractf32x4 $1, %ymm15, %xmm19
+    vaddps %xmm19, %xmm15, %xmm15
+    vhaddps %xmm15, %xmm15, %xmm15
+    vhaddps %xmm15, %xmm15, %xmm15
+    
+    mov %rdi, %r8
+    inc %r8
+    add %rsi, %r8
+    add $3, %r8                         /* jj + 3 */
+    imul %r15, %r8
+    vmulss %xmm8, %xmm15, %xmm15
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19
+    vaddss %xmm19, %xmm15, %xmm15
+    vmovss %xmm15, (%r14, %r8, 4)
+    
+    /* ii_local=2, jj_local=3: zmm16 */
+    vextractf64x4 $1, %zmm16, %ymm19
+    vaddps %ymm19, %ymm16, %ymm16
+    vextractf32x4 $1, %zmm16, %xmm19
+    vaddps %xmm19, %xmm16, %xmm16
+    vhaddps %xmm16, %xmm16, %xmm16
+    vhaddps %xmm16, %xmm16, %xmm16
+    
+    mov %rdi, %r8
+    add $2, %r8
+    add %rsi, %r8
+    add $3, %r8                         /* jj + 3 */
+    imul %r15, %r8
+    vmulss %xmm8, %xmm16, %xmm16
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19
+    vaddss %xmm19, %xmm16, %xmm16
+    vmovss %xmm16, (%r14, %r8, 4)
+    
+    /* ii_local=3, jj_local=3: zmm17 */
+    vextractf64x4 $1, %zmm17, %ymm19
+    vaddps %ymm19, %ymm17, %ymm17
+    vextractf32x4 $1, %zmm17, %xmm19
+    vaddps %xmm19, %xmm17, %xmm17
+    vhaddps %xmm17, %xmm17, %xmm17
+    vhaddps %xmm17, %xmm17, %xmm17
+    
+    mov %rdi, %r8
+    add $3, %r8
+    add %rsi, %r8
+    add $3, %r8                         /* jj + 3 */
+    imul %r15, %r8
+    vmulss %xmm8, %xmm17, %xmm17
+    vmulss %xmm9, (%r14, %r8, 4), %xmm19
+    vaddss %xmm19, %xmm17, %xmm17
+    vmovss %xmm17, (%r14, %r8, 4)
     
     pop %r15
     pop %r14
