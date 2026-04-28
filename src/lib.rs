@@ -28,24 +28,42 @@ unsafe fn gemm_bf16_kernel(
     // Initialize accumulators for the TILE_I × TILE_J tile
     let mut accumulators = [[_mm512_setzero_ps(); TILE_J]; TILE_I];
     
+    // Macro for a single VDPBF16PS operation
+    macro_rules! dpbf16_step {
+        ($ii_local:expr, $jj_local:expr, $ii:expr, $jj:expr, $idx:expr, $a:expr, $lda:expr, $b:expr, $ldb:expr, $accumulators:expr) => {
+            let i = $ii + $ii_local;
+            let j = $jj + $jj_local;
+            
+            let a_ptr = $a.as_ptr().add(i * $lda + $idx);
+            let b_ptr = $b.as_ptr().add(j * $ldb + $idx);
+            
+            let a_data: __m512bh = transmute(_mm512_loadu_si512(a_ptr as *const __m512i));
+            let b_data: __m512bh = transmute(_mm512_loadu_si512(b_ptr as *const __m512i));
+            
+            $accumulators[$ii_local][$jj_local] = _mm512_dpbf16_ps($accumulators[$ii_local][$jj_local], a_data, b_data);
+        };
+    }
+    
     // Outer loop over k (in chunks of 32)
     let mut idx = 0;
     while idx + 32 <= k {
-        // Inner loops over j and i in the tile
-        for jj_local in 0..TILE_J {
-            for ii_local in 0..TILE_I {
-                let i = ii + ii_local;
-                let j = jj + jj_local;
-                
-                let a_ptr = a.as_ptr().add(i * lda + idx);
-                let b_ptr = b.as_ptr().add(j * ldb + idx);
-                
-                let a_data: __m512bh = transmute(_mm512_loadu_si512(a_ptr as *const __m512i));
-                let b_data: __m512bh = transmute(_mm512_loadu_si512(b_ptr as *const __m512i));
-                
-                accumulators[ii_local][jj_local] = _mm512_dpbf16_ps(accumulators[ii_local][jj_local], a_data, b_data);
-            }
-        }
+        // Manually unrolled 4×4 tile operations
+        dpbf16_step!(0, 0, ii, jj, idx, a, lda, b, ldb, accumulators);
+        dpbf16_step!(1, 0, ii, jj, idx, a, lda, b, ldb, accumulators);
+        dpbf16_step!(2, 0, ii, jj, idx, a, lda, b, ldb, accumulators);
+        dpbf16_step!(3, 0, ii, jj, idx, a, lda, b, ldb, accumulators);
+        dpbf16_step!(0, 1, ii, jj, idx, a, lda, b, ldb, accumulators);
+        dpbf16_step!(1, 1, ii, jj, idx, a, lda, b, ldb, accumulators);
+        dpbf16_step!(2, 1, ii, jj, idx, a, lda, b, ldb, accumulators);
+        dpbf16_step!(3, 1, ii, jj, idx, a, lda, b, ldb, accumulators);
+        dpbf16_step!(0, 2, ii, jj, idx, a, lda, b, ldb, accumulators);
+        dpbf16_step!(1, 2, ii, jj, idx, a, lda, b, ldb, accumulators);
+        dpbf16_step!(2, 2, ii, jj, idx, a, lda, b, ldb, accumulators);
+        dpbf16_step!(3, 2, ii, jj, idx, a, lda, b, ldb, accumulators);
+        dpbf16_step!(0, 3, ii, jj, idx, a, lda, b, ldb, accumulators);
+        dpbf16_step!(1, 3, ii, jj, idx, a, lda, b, ldb, accumulators);
+        dpbf16_step!(2, 3, ii, jj, idx, a, lda, b, ldb, accumulators);
+        dpbf16_step!(3, 3, ii, jj, idx, a, lda, b, ldb, accumulators);
         
         idx += 32;
     }
