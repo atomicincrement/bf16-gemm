@@ -78,6 +78,26 @@ pub fn bf16_dot_product(a: &[bf16], b: &[bf16]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x.to_f32() * y.to_f32()).sum()
 }
 
+// Assembly implementation of gemm_bf16_kernel (GNU AT&T x86-64)
+// Computes 16 VDPBF16PS instructions per k-iteration for 4×4 tile.
+// Note: Write-back logic still TODO in assembly.
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" {
+    pub fn gemm_bf16_kernel_asm(
+        ii: usize,
+        jj: usize,
+        k: usize,
+        alpha: f32,
+        a: *const bf16,
+        lda: usize,
+        b: *const bf16,
+        ldb: usize,
+        beta: f32,
+        c: *mut f32,
+        ldc: usize,
+    );
+}
+
 /// Compute a single TILE_I × TILE_J output tile using the k-loop.
 /// Called for each tile position (ii, jj) in the main gemm_bf16 function.
 /// Reference implementation (unoptimized).
@@ -139,74 +159,6 @@ unsafe fn gemm_bf16_kernel_ref(
     }
 }
 
-/// Inline assembly version using Rust intrinsics with explicit register management.
-/// This version demonstrates the k-loop structure in a clear, manageable way.
-/// Alternative implementation - kept for reference and future optimization.
-#[allow(dead_code)]
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx512bf16")]
-unsafe fn gemm_bf16_kernel_asm(
-    ii: usize,
-    jj: usize,
-    k: usize,
-    alpha: f32,
-    a: &[bf16],
-    lda: usize,
-    b: &[bf16],
-    ldb: usize,
-    beta: f32,
-    c: &mut [f32],
-    ldc: usize,
-) {
-    use std::arch::x86_64::*;
-    use std::mem::transmute;
-    
-    const TILE_I: usize = 4;
-    const TILE_J: usize = 4;
-    
-    // Initialize 16 accumulators in registers (zmm0-zmm15)
-    let mut accs: [__m512; 16] = [_mm512_setzero_ps(); 16];
-    
-    // K-loop: process 32 BF16 elements at a time
-    let mut idx = 0;
-    while idx + 32 <= k {
-        // Load A data for all 4 rows
-        let a_data: [__m512bh; 4] = [
-            transmute(_mm512_loadu_si512((a.as_ptr().add(ii * lda + idx)) as *const __m512i)),
-            transmute(_mm512_loadu_si512((a.as_ptr().add((ii+1) * lda + idx)) as *const __m512i)),
-            transmute(_mm512_loadu_si512((a.as_ptr().add((ii+2) * lda + idx)) as *const __m512i)),
-            transmute(_mm512_loadu_si512((a.as_ptr().add((ii+3) * lda + idx)) as *const __m512i)),
-        ];
-        
-        // For each column, load B data and accumulate into 4x4 tile
-        for jj_local in 0..TILE_J {
-            let b_data: __m512bh = transmute(_mm512_loadu_si512(
-                (b.as_ptr().add((jj + jj_local) * ldb + idx)) as *const __m512i
-            ));
-            
-            // Accumulate dot products for all 4 rows
-            for ii_local in 0..TILE_I {
-                let acc_idx = ii_local * TILE_J + jj_local;
-                accs[acc_idx] = _mm512_dpbf16_ps(accs[acc_idx], a_data[ii_local], b_data);
-            }
-        }
-        
-        idx += 32;
-    }
-    
-    // Horizontal reduction and write back
-    for ii_local in 0..TILE_I {
-        for jj_local in 0..TILE_J {
-            let acc_idx = ii_local * TILE_J + jj_local;
-            let dot = _mm512_reduce_add_ps(accs[acc_idx]);
-            let i = ii + ii_local;
-            let j = jj + jj_local;
-            let c_idx = i + j * ldc;
-            c[c_idx] = alpha * dot + beta * c[c_idx];
-        }
-    }
-}
-
 /// Compute a single TILE_I × TILE_J output tile using the k-loop.
 /// Currently dispatches to the reference implementation.
 #[cfg(target_arch = "x86_64")]
@@ -224,7 +176,7 @@ unsafe fn gemm_bf16_kernel(
     c: &mut [f32],
     ldc: usize,
 ) {
-    // Use reference implementation (can swap to _asm variant for testing)
+    // Use reference implementation (can swap to native asm version for testing)
     gemm_bf16_kernel_ref(ii, jj, k, alpha, a, lda, b, ldb, beta, c, ldc);
 }
 
