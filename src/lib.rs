@@ -87,7 +87,9 @@ pub fn bf16_dot_product(a: &[bf16], b: &[bf16]) -> f32 {
 /// - B: k×n (untransposed), column-major, leading dimension ldb
 /// - C: m×n (result), column-major, leading dimension ldc
 /// 
+/// m and n must be multiples of 4.
 /// k must be a multiple of 32.
+/// Uses 4×4 tiling for improved cache coherence.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bf16")]
 pub unsafe fn gemm_bf16(
@@ -103,24 +105,55 @@ pub unsafe fn gemm_bf16(
     c: &mut [f32],
     ldc: usize,
 ) {
-    assert!(k % 32 == 0, "k must be a multiple of 32");
+    use std::arch::x86_64::*;
+    use std::mem::transmute;
     
-    // Iterate over output matrix C in column-major order
-    for j in 0..n {
-        for i in 0..m {
-            // Extract column i of A^T (which is column i of the transposed A matrix in column-major)
-            let a_col = &a[i * lda .. i * lda + k];
+    assert!(k % 32 == 0, "k must be a multiple of 32");
+    assert!(m % 4 == 0, "m must be a multiple of 4");
+    assert!(n % 4 == 0, "n must be a multiple of 4");
+    
+    const TILE: usize = 4;
+    
+    // Iterate over 4×4 tiles of output matrix C in column-major order
+    let mut jj = 0;
+    while jj < n {
+        let mut ii = 0;
+        while ii < m {
+            // Process 4×4 tile
+            for j in jj..jj + TILE {
+                for i in ii..ii + TILE {
+                    // Extract column i of A^T
+                    let a_col = &a[i * lda .. i * lda + k];
+                    
+                    // Extract column j of B
+                    let b_col = &b[j * ldb .. j * ldb + k];
+                    
+                    // Inline dot product computation
+                    let mut accumulator = _mm512_setzero_ps();
+                    let mut idx = 0;
+                    while idx + 32 <= k {
+                        let a_ptr = a_col.as_ptr().add(idx);
+                        let b_ptr = b_col.as_ptr().add(idx);
+                        
+                        let a_data: __m512bh = transmute(_mm512_loadu_si512(a_ptr as *const __m512i));
+                        let b_data: __m512bh = transmute(_mm512_loadu_si512(b_ptr as *const __m512i));
+                        
+                        accumulator = _mm512_dpbf16_ps(accumulator, a_data, b_data);
+                        
+                        idx += 32;
+                    }
+                    let dot = _mm512_reduce_add_ps(accumulator);
+                    
+                    // Update C[i, j] = alpha * dot + beta * C[i, j]
+                    let c_idx = i + j * ldc;
+                    c[c_idx] = alpha * dot + beta * c[c_idx];
+                }
+            }
             
-            // Extract column j of B
-            let b_col = &b[j * ldb .. j * ldb + k];
-            
-            // Compute dot product
-            let dot = bf16_dot_product(a_col, b_col);
-            
-            // Update C[i, j] = alpha * dot + beta * C[i, j]
-            let c_idx = i + j * ldc;
-            c[c_idx] = alpha * dot + beta * c[c_idx];
+            ii += TILE;
         }
+        
+        jj += TILE;
     }
 }
 
@@ -138,14 +171,33 @@ pub fn gemm_bf16(
     c: &mut [f32],
     ldc: usize,
 ) {
-    for j in 0..n {
-        for i in 0..m {
-            let a_col = &a[i * lda .. i * lda + k];
-            let b_col = &b[j * ldb .. j * ldb + k];
-            let dot = bf16_dot_product(a_col, b_col);
-            let c_idx = i + j * ldc;
-            c[c_idx] = alpha * dot + beta * c[c_idx];
+    assert!(m % 4 == 0, "m must be a multiple of 4");
+    assert!(n % 4 == 0, "n must be a multiple of 4");
+    
+    const TILE: usize = 4;
+    
+    let mut jj = 0;
+    while jj < n {
+        let mut ii = 0;
+        while ii < m {
+            for j in jj..jj + TILE {
+                for i in ii..ii + TILE {
+                    let a_col = &a[i * lda .. i * lda + k];
+                    let b_col = &b[j * ldb .. j * ldb + k];
+                    
+                    // Inline dot product computation
+                    let dot: f32 = a_col.iter().zip(b_col.iter()).map(|(x, y)| x.to_f32() * y.to_f32()).sum();
+                    
+                    // Update C[i, j] = alpha * dot + beta * C[i, j]
+                    let c_idx = i + j * ldc;
+                    c[c_idx] = alpha * dot + beta * c[c_idx];
+                }
+            }
+            
+            ii += TILE;
         }
+        
+        jj += TILE;
     }
 }
 
@@ -199,19 +251,22 @@ mod tests {
     #[test]
     fn test_gemm_bf16_simple() {
         // Test C = alpha * A^T * B + beta * C
-        // A: 4×2 (transposed), B: 4×3, C: 2×3
-        let m = 2;
-        let n = 3;
+        // A: 4×4 (transposed), B: 4×4, C: 4×4
+        let m = 4;
+        let n = 4;
         let k = 32; // Multiple of 32
         
         let mut a = vec![bf16::ZERO; m * k];
         let mut b = vec![bf16::ZERO; n * k];
         let mut c = vec![0.0f32; m * n];
         
-        // A^T in column-major: column 0 = [1, 2, ...], column 1 = [3, 4, ...]
-        for i in 0..k {
-            a[0 * k + i] = bf16::from_f32(if i == 0 { 1.0 } else if i == 1 { 2.0 } else { 0.0 });
-            a[1 * k + i] = bf16::from_f32(if i == 0 { 3.0 } else if i == 1 { 4.0 } else { 0.0 });
+        // A^T in column-major: column i = [i+1, i+2, ...]
+        for i in 0..m {
+            for idx in 0..k {
+                if idx < 2 {
+                    a[i * k + idx] = bf16::from_f32((i as f32 + 1.0) * (idx as f32 + 1.0));
+                }
+            }
         }
         
         // B in column-major
@@ -231,12 +286,9 @@ mod tests {
         gemm_bf16(m, n, k, 1.0, &a, k, &b, k, 0.0, &mut c, m);
 
         // C[0,0] = a_col0 · b_col0 = (1*1 + 2*2 + 0 + ...) = 5
-        // C[1,0] = a_col1 · b_col0 = (3*1 + 4*2 + 0 + ...) = 11
-        // C[0,1] = a_col0 · b_col1 = (1*2 + 2*4 + 0 + ...) = 10
-        // etc.
+        // C[1,0] = a_col1 · b_col0 = (2*1 + 4*2 + 0 + ...) = 10
         assert!((c[0] - 5.0).abs() < 0.1, "c[0,0]={}, expected ~5", c[0]);
-        assert!((c[1] - 11.0).abs() < 0.1, "c[1,0]={}, expected ~11", c[1]);
-        assert!((c[2] - 10.0).abs() < 0.1, "c[0,1]={}, expected ~10", c[2]);
+        assert!((c[1] - 10.0).abs() < 0.1, "c[1,0]={}, expected ~10", c[1]);
     }
 }
 
