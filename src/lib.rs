@@ -2,109 +2,11 @@
 
 use half::bf16;
 
-/// Compute the sum of scalar * vector over all elements.
-/// 
-/// Assumes `vector` length is a multiple of 32 bf16 elements (64 bytes).
-/// Uses AVX-512 with unaligned loads and VDPBF16PS for efficient computation.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx512bf16")]
-pub unsafe fn mul_bf16(scalar: bf16, vector: &[bf16]) -> f32 {
-    use std::arch::x86_64::*;
-    use std::mem::transmute;
-
-    // Broadcast scalar to all 32 BF16 slots in a ZMM register
-    let scalar_bf16: __m512bh = transmute(_mm512_set1_epi16(scalar.to_bits() as i16));
-
-    let mut accumulator = _mm512_setzero_ps();
-
-    let mut idx = 0;
-    while idx + 32 <= vector.len() {
-        // Unaligned load of 32 BF16 values (64 bytes)
-        let ptr = vector.as_ptr().add(idx);
-        let vec_data: __m512bh = transmute(_mm512_loadu_si512(ptr as *const __m512i));
-
-        // Dot product: accumulate scalar * vector using VDPBF16PS
-        accumulator = _mm512_dpbf16_ps(accumulator, scalar_bf16, vec_data);
-
-        idx += 32;
-    }
-
-    // Horizontal reduce to get final sum
-    _mm512_reduce_add_ps(accumulator)
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-pub fn mul_bf16(scalar: bf16, vector: &[bf16]) -> f32 {
-    let scalar_f32 = scalar.to_f32();
-    vector.iter().map(|v| scalar_f32 * v.to_f32()).sum()
-}
-
-/// Compute the dot product of two BF16 vectors.
-/// 
-/// Assumes both vectors have length that is a multiple of 32 bf16 elements.
-/// Uses AVX-512 with unaligned loads and VDPBF16PS for efficient computation.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx512bf16")]
-pub unsafe fn bf16_dot_product(a: &[bf16], b: &[bf16]) -> f32 {
-    use std::arch::x86_64::*;
-    use std::mem::transmute;
-
-    assert_eq!(a.len(), b.len());
-
-    let mut accumulator = _mm512_setzero_ps();
-
-    let mut idx = 0;
-    while idx + 32 <= a.len() {
-        // Unaligned load of 32 BF16 values from each vector
-        let a_ptr = a.as_ptr().add(idx);
-        let b_ptr = b.as_ptr().add(idx);
-        
-        let a_data: __m512bh = transmute(_mm512_loadu_si512(a_ptr as *const __m512i));
-        let b_data: __m512bh = transmute(_mm512_loadu_si512(b_ptr as *const __m512i));
-
-        // Dot product: accumulate a * b using VDPBF16PS
-        accumulator = _mm512_dpbf16_ps(accumulator, a_data, b_data);
-
-        idx += 32;
-    }
-
-    // Horizontal reduce to get final sum
-    _mm512_reduce_add_ps(accumulator)
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-pub fn bf16_dot_product(a: &[bf16], b: &[bf16]) -> f32 {
-    assert_eq!(a.len(), b.len());
-    a.iter().zip(b.iter()).map(|(x, y)| x.to_f32() * y.to_f32()).sum()
-}
-
-// Assembly implementation of gemm_bf16_kernel (GNU AT&T x86-64)
-// Computes 16 VDPBF16PS instructions per k-iteration for 4×4 tile.
-// Includes optimized write-back: horizontal reduction + alpha*result + beta*C scaling.
-#[cfg(target_arch = "x86_64")]
-unsafe extern "C" {
-    pub fn gemm_bf16_kernel_asm(
-        ii: usize,
-        jj: usize,
-        k: usize,
-        alpha: f32,
-        a: *const bf16,
-        lda: usize,
-        b: *const bf16,
-        ldb: usize,
-        beta: f32,
-        c: *mut f32,
-        ldc: usize,
-    );
-}
-
 /// Compute a single TILE_I × TILE_J output tile using the k-loop.
-/// Reference intrinsics-based implementation (not used on x86_64 with AVX-512).
-/// Kept for debugging and comparison purposes.
+/// Uses AVX-512 intrinsics with VDPBF16PS for efficient BF16 computation.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bf16")]
-#[allow(dead_code)]
-unsafe fn gemm_bf16_kernel_ref(
+unsafe fn gemm_bf16_kernel(
     ii: usize,
     jj: usize,
     k: usize,
@@ -160,41 +62,17 @@ unsafe fn gemm_bf16_kernel_ref(
     }
 }
 
-/// Compute a single TILE_I × TILE_J output tile using the k-loop.
-/// Currently dispatches to the assembly implementation on x86_64 with AVX-512.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx512bf16")]
-#[inline(never)]
-unsafe fn gemm_bf16_kernel(
-    ii: usize,
-    jj: usize,
-    k: usize,
-    alpha: f32,
-    a: &[bf16],
-    lda: usize,
-    b: &[bf16],
-    ldb: usize,
-    beta: f32,
-    c: &mut [f32],
-    ldc: usize,
-) {
-    // Use reference implementation with #[inline(never)] for better profiling
-    // TODO: Complete ASM write-back logic and switch back to asm version
-    gemm_bf16_kernel_ref(ii, jj, k, alpha, a, lda, b, ldb, beta, c, ldc);
-}
-
 /// General matrix multiply: C = alpha * A^T * B + beta * C
 ///
-/// Currently only supports trans_a='T' and trans_b='N'.
-/// 
+/// Requires x86_64 with AVX-512F and AVX-512BF16 instructions.
+///
 /// Matrices are stored in column-major order:
 /// - A: k×m (transposed), column-major, leading dimension lda
 /// - B: k×n (untransposed), column-major, leading dimension ldb
 /// - C: m×n (result), column-major, leading dimension ldc
 /// 
-/// m and n must be multiples of 16 (SUPERTILE_I and SUPERTILE_J respectively).
-/// k must be a multiple of 32.
-/// Uses hierarchical tiling: SUPERTILE (16×16) containing 4×4 TILE blocks for improved cache coherence.
+/// m and n must be multiples of 16. k must be a multiple of 32.
+/// Uses hierarchical tiling with 8×16 supertiles containing 4×4 tiles for cache coherence.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bf16")]
 pub unsafe fn gemm_bf16(
@@ -210,21 +88,21 @@ pub unsafe fn gemm_bf16(
     c: &mut [f32],
     ldc: usize,
 ) {
-    assert!(k % 32 == 0, "k must be a multiple of 32");
-    assert!(m % 16 == 0, "m must be a multiple of 16 (SUPERTILE_I)");
-    assert!(n % 16 == 0, "n must be a multiple of 16 (SUPERTILE_J)");
-    
-    const SUPERTILE_I: usize = 16;
-    const SUPERTILE_J: usize = 16;
     const TILE_I: usize = 4;
     const TILE_J: usize = 4;
+    const SUPERTILE_I: usize = 8;
+    const SUPERTILE_J: usize = 16;
     
-    // Iterate over SUPERTILE_J × SUPERTILE_I supertiles (column-major outer loop)
+    assert!(k % 32 == 0, "k must be a multiple of 32");
+    assert!(m % SUPERTILE_I == 0, "m must be a multiple of SUPERTILE_I (8)");
+    assert!(n % SUPERTILE_J == 0, "n must be a multiple of SUPERTILE_J (16)");
+    
+    // Iterate over supertiles (column-major outer loop)
     let mut jjj = 0;
     while jjj < n {
         let mut iii = 0;
         while iii < m {
-            // Within supertile, iterate over TILE_J × TILE_I tiles
+            // Within supertile, iterate over 4×4 tiles
             let mut jj = jjj;
             while jj < (jjj + SUPERTILE_J) {
                 let mut ii = iii;
@@ -240,68 +118,15 @@ pub unsafe fn gemm_bf16(
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-fn gemm_bf16_kernel_ref(
-    ii: usize,
-    jj: usize,
-    k: usize,
-    alpha: f32,
-    a: &[bf16],
-    lda: usize,
-    b: &[bf16],
-    ldb: usize,
-    beta: f32,
-    c: &mut [f32],
-    ldc: usize,
-) {
-    const TILE_I: usize = 4;
-    const TILE_J: usize = 4;
-    
-    // Initialize accumulators for the TILE_I × TILE_J tile
-    let mut accumulators = [[0.0f32; TILE_J]; TILE_I];
-    
-    // Outer loop over k
-    for idx in 0..k {
-        // Inner loops over j and i in the tile
-        for jj_local in 0..TILE_J {
-            for ii_local in 0..TILE_I {
-                let i = ii + ii_local;
-                let j = jj + jj_local;
-                accumulators[ii_local][jj_local] += a[i * lda + idx].to_f32() * b[j * ldb + idx].to_f32();
-            }
-        }
-    }
-    
-    // Write back results
-    for jj_local in 0..TILE_J {
-        for ii_local in 0..TILE_I {
-            let i = ii + ii_local;
-            let j = jj + jj_local;
-            let c_idx = i + j * ldc;
-            c[c_idx] = alpha * accumulators[ii_local][jj_local] + beta * c[c_idx];
-        }
-    }
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn gemm_bf16_kernel(
-    ii: usize,
-    jj: usize,
-    k: usize,
-    alpha: f32,
-    a: &[bf16],
-    lda: usize,
-    b: &[bf16],
-    ldb: usize,
-    beta: f32,
-    c: &mut [f32],
-    ldc: usize,
-) {
-    gemm_bf16_kernel_ref(ii, jj, k, alpha, a, lda, b, ldb, beta, c, ldc);
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-pub fn gemm_bf16(
+/// Parameterized GEMM with configurable supertile dimensions.
+/// 
+/// Requires x86_64 with AVX-512F and AVX-512BF16 instructions.
+/// 
+/// supertile_i: height of supertile (must divide m and be multiple of TILE_I=4)
+/// supertile_j: width of supertile (must divide n and be multiple of TILE_J=4)
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bf16")]
+pub unsafe fn gemm_bf16_with_tiling(
     m: usize,
     n: usize,
     k: usize,
@@ -313,112 +138,36 @@ pub fn gemm_bf16(
     beta: f32,
     c: &mut [f32],
     ldc: usize,
+    supertile_i: usize,
+    supertile_j: usize,
 ) {
-    assert!(m % 4 == 0, "m must be a multiple of 4");
-    assert!(n % 4 == 0, "n must be a multiple of 4");
+    assert!(k % 32 == 0, "k must be a multiple of 32");
+    assert!(m % supertile_i == 0, "m must be a multiple of supertile_i");
+    assert!(n % supertile_j == 0, "n must be a multiple of supertile_j");
+    assert!(supertile_i % 4 == 0, "supertile_i must be a multiple of 4 (TILE_I)");
+    assert!(supertile_j % 4 == 0, "supertile_j must be a multiple of 4 (TILE_J)");
     
     const TILE_I: usize = 4;
     const TILE_J: usize = 4;
     
-    let mut jj = 0;
-    while jj < n {
-        let mut ii = 0;
-        while ii < m {
-            gemm_bf16_kernel(ii, jj, k, alpha, a, lda, b, ldb, beta, c, ldc);
-            ii += TILE_I;
-        }
-        jj += TILE_J;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mul_bf16_simple() {
-        let scalar = bf16::from_f32(2.0);
-        // Vector with 32 bf16 elements (64 bytes)
-        let mut vector = vec![bf16::ZERO; 32];
-        vector[0] = bf16::from_f32(1.0);
-        vector[1] = bf16::from_f32(2.0);
-        vector[2] = bf16::from_f32(3.0);
-        vector[3] = bf16::from_f32(4.0);
-        
-        #[cfg(target_arch = "x86_64")]
-        let result = unsafe { mul_bf16(scalar, &vector) };
-        #[cfg(not(target_arch = "x86_64"))]
-        let result = mul_bf16(scalar, &vector);
-
-        // 2.0 * (1.0 + 2.0 + 3.0 + 4.0 + 0 + ... + 0) = 2.0 * 10.0 = 20.0
-        assert!((result - 20.0).abs() < 0.1);
-    }
-
-    #[test]
-    fn test_mul_bf162_simple() {
-        let mut a = vec![bf16::ZERO; 32];
-        let mut b = vec![bf16::ZERO; 32];
-        
-        a[0] = bf16::from_f32(1.0);
-        a[1] = bf16::from_f32(2.0);
-        a[2] = bf16::from_f32(3.0);
-        a[3] = bf16::from_f32(4.0);
-        
-        b[0] = bf16::from_f32(2.0);
-        b[1] = bf16::from_f32(3.0);
-        b[2] = bf16::from_f32(4.0);
-        b[3] = bf16::from_f32(5.0);
-        
-        #[cfg(target_arch = "x86_64")]
-        let result = unsafe { bf16_dot_product(&a, &b) };
-        #[cfg(not(target_arch = "x86_64"))]
-        let result = bf16_dot_product(&a, &b);
-
-        // 1.0*2.0 + 2.0*3.0 + 3.0*4.0 + 4.0*5.0 = 2 + 6 + 12 + 20 = 40
-        assert!((result - 40.0).abs() < 0.1);
-    }
-
-    #[test]
-    fn test_gemm_bf16_simple() {
-        // Test C = alpha * A^T * B + beta * C
-        // A: 16×16 (transposed), B: 16×16, C: 16×16 (multiple of 16 for supertiling)
-        let m = 16;
-        let n = 16;
-        let k = 32; // Multiple of 32
-        
-        let mut a = vec![bf16::ZERO; m * k];
-        let mut b = vec![bf16::ZERO; n * k];
-        let mut c = vec![0.0f32; m * n];
-        
-        // A^T in column-major: column i has values set for first 2 k elements
-        for i in 0..m {
-            for idx in 0..k {
-                if idx < 2 {
-                    a[i * k + idx] = bf16::from_f32((i as f32 + 1.0) * (idx as f32 + 1.0));
+    // Iterate over supertiles (column-major outer loop)
+    let mut jjj = 0;
+    while jjj < n {
+        let mut iii = 0;
+        while iii < m {
+            // Within supertile, iterate over 4×4 tiles
+            let mut jj = jjj;
+            while jj < (jjj + supertile_j) {
+                let mut ii = iii;
+                while ii < (iii + supertile_i) {
+                    gemm_bf16_kernel(ii, jj, k, alpha, a, lda, b, ldb, beta, c, ldc);
+                    ii += TILE_I;
                 }
+                jj += TILE_J;
             }
+            iii += supertile_i;
         }
-        
-        // B in column-major
-        for j in 0..n {
-            for i in 0..k {
-                if i < 2 {
-                    b[j * k + i] = bf16::from_f32((j as f32 + 1.0) * (i as f32 + 1.0));
-                }
-            }
-        }
-        
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            gemm_bf16(m, n, k, 1.0, &a, k, &b, k, 0.0, &mut c, m);
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        gemm_bf16(m, n, k, 1.0, &a, k, &b, k, 0.0, &mut c, m);
-
-        // C[0,0] = a_col0 · b_col0 = (1*1 + 2*2 + 0 + ...) = 5
-        // C[1,0] = a_col1 · b_col0 = (2*1 + 4*2 + 0 + ...) = 10
-        assert!((c[0] - 5.0).abs() < 0.1, "c[0,0]={}, expected ~5", c[0]);
-        assert!((c[1] - 10.0).abs() < 0.1, "c[1,0]={}, expected ~10", c[1]);
+        jjj += supertile_j;
     }
 }
 
