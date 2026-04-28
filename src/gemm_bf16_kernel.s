@@ -63,9 +63,17 @@ gemm_bf16_kernel_asm:
     vpxorq %zmm16, %zmm16, %zmm16
     vpxorq %zmm17, %zmm17, %zmm17
     
-    /* Pre-compute row offsets for A */
+    /* Pre-compute byte offsets */
     lea 0(,%r15,2), %r8     /* lda_bytes = lda * 2 */
     lea 0(,%r10,2), %rcx    /* ldb_bytes = ldb * 2 */
+    
+    /* Strength reduce: compute initial row offset for A (1 multiply) */
+    mov %rdi, %r12
+    imul %r8, %r12          /* a_row_offset = ii * lda_bytes */
+    
+    /* Strength reduce: compute initial column offset for B (1 multiply) */
+    mov %rsi, %r13
+    imul %rcx, %r13         /* b_col_offset = jj * ldb_bytes */
     
     /* K-loop: idx from 0 to k, increment by 32 */
     xor %rax, %rax          /* idx = 0 */
@@ -78,30 +86,20 @@ gemm_bf16_kernel_asm:
     lea 0(%r14, %rax, 2), %rbx  /* base_a = a + idx*2 */
     lea 0(%r9, %rax, 2), %r11   /* base_b = b + idx*2 */
     
-    /* Load all 4 rows of A: a[ii+ii_local, idx:idx+32] for ii_local in 0..4 */
-    mov %rdi, %r12
-    imul %r8, %r12
+    /* Load all 4 rows of A: unroll with strength reduction (add instead of multiply) */
     vmovups (%rbx, %r12), %zmm18        /* A[ii+0] */
     
-    mov %rdi, %r12
-    inc %r12
-    imul %r8, %r12
-    vmovups (%rbx, %r12), %zmm19        /* A[ii+1] */
+    lea (%r12, %r8), %r14               /* next_offset = current + lda_bytes */
+    vmovups (%rbx, %r14), %zmm19        /* A[ii+1] */
     
-    mov %rdi, %r12
-    add $2, %r12
-    imul %r8, %r12
-    vmovups (%rbx, %r12), %zmm20        /* A[ii+2] */
+    lea (%r14, %r8), %r14               /* next_offset = current + lda_bytes */
+    vmovups (%rbx, %r14), %zmm20        /* A[ii+2] */
     
-    mov %rdi, %r12
-    add $3, %r12
-    imul %r8, %r12
-    vmovups (%rbx, %r12), %zmm21        /* A[ii+3] */
+    lea (%r14, %r8), %r14               /* next_offset = current + lda_bytes */
+    vmovups (%rbx, %r14), %zmm21        /* A[ii+3] */
     
     /* jj_local = 0: Load B[jj+0, idx:idx+32], do 4 VDPBF16PS */
-    mov %rsi, %r12
-    imul %rcx, %r12
-    vmovups (%r11, %r12), %zmm22        /* B[jj+0] */
+    vmovups (%r11, %r13), %zmm22        /* B[jj+0] with pre-computed offset */
     
     vdpbf16ps %zmm22, %zmm18, %zmm0
     vdpbf16ps %zmm22, %zmm19, %zmm1
@@ -109,10 +107,8 @@ gemm_bf16_kernel_asm:
     vdpbf16ps %zmm22, %zmm21, %zmm3
     
     /* jj_local = 1: Load B[jj+1, idx:idx+32], do 4 VDPBF16PS */
-    mov %rsi, %r12
-    inc %r12
-    imul %rcx, %r12
-    vmovups (%r11, %r12), %zmm22        /* B[jj+1] */
+    lea (%r13, %rcx), %r14              /* next B offset */
+    vmovups (%r11, %r14), %zmm22        /* B[jj+1] */
     
     vdpbf16ps %zmm22, %zmm18, %zmm4
     vdpbf16ps %zmm22, %zmm19, %zmm5
@@ -120,10 +116,8 @@ gemm_bf16_kernel_asm:
     vdpbf16ps %zmm22, %zmm21, %zmm7
     
     /* jj_local = 2: Load B[jj+2, idx:idx+32], do 4 VDPBF16PS */
-    mov %rsi, %r12
-    add $2, %r12
-    imul %rcx, %r12
-    vmovups (%r11, %r12), %zmm22        /* B[jj+2] */
+    lea (%r14, %rcx), %r14              /* next B offset */
+    vmovups (%r11, %r14), %zmm22        /* B[jj+2] */
     
     vdpbf16ps %zmm22, %zmm18, %zmm10
     vdpbf16ps %zmm22, %zmm19, %zmm11
@@ -131,10 +125,8 @@ gemm_bf16_kernel_asm:
     vdpbf16ps %zmm22, %zmm21, %zmm13
     
     /* jj_local = 3: Load B[jj+3, idx:idx+32], do 4 VDPBF16PS */
-    mov %rsi, %r12
-    add $3, %r12
-    imul %rcx, %r12
-    vmovups (%r11, %r12), %zmm22        /* B[jj+3] */
+    lea (%r14, %rcx), %r14              /* next B offset */
+    vmovups (%r11, %r14), %zmm22        /* B[jj+3] */
     
     vdpbf16ps %zmm22, %zmm18, %zmm14
     vdpbf16ps %zmm22, %zmm19, %zmm15
