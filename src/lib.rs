@@ -87,9 +87,9 @@ pub fn bf16_dot_product(a: &[bf16], b: &[bf16]) -> f32 {
 /// - B: k×n (untransposed), column-major, leading dimension ldb
 /// - C: m×n (result), column-major, leading dimension ldc
 /// 
-/// m and n must be multiples of 4.
+/// m and n must be multiples of 4 (TILE_I and TILE_J respectively).
 /// k must be a multiple of 32.
-/// Uses 4×4 tiling for improved cache coherence.
+/// Uses TILE_I × TILE_J tiling for improved cache coherence.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bf16")]
 pub unsafe fn gemm_bf16(
@@ -112,23 +112,24 @@ pub unsafe fn gemm_bf16(
     assert!(m % 4 == 0, "m must be a multiple of 4");
     assert!(n % 4 == 0, "n must be a multiple of 4");
     
-    const TILE: usize = 4;
+    const TILE_I: usize = 4;
+    const TILE_J: usize = 4;
     
-    // Iterate over 4×4 tiles of output matrix C in column-major order
+    // Iterate over TILE_I × TILE_J tiles of output matrix C in column-major order
     let mut jj = 0;
     while jj < n {
         let mut ii = 0;
         while ii < m {
-            // Process 4×4 tile
-            for j in jj..jj + TILE {
-                // Initialize accumulators for the 4 i values in this tile
-                let mut accumulators = [_mm512_setzero_ps(); 4];
+            // Process TILE_I × TILE_J tile
+            for j in jj..jj + TILE_J {
+                // Initialize accumulators for the TILE_I i values in this tile
+                let mut accumulators = [_mm512_setzero_ps(); TILE_I];
                 
                 // Outer loop over k (in chunks of 32)
                 let mut idx = 0;
                 while idx + 32 <= k {
                     // Inner loop over i in the tile
-                    for ii_local in 0..TILE {
+                    for ii_local in 0..TILE_I {
                         let i = ii + ii_local;
                         
                         let a_ptr = a.as_ptr().add(i * lda + idx);
@@ -144,7 +145,7 @@ pub unsafe fn gemm_bf16(
                 }
                 
                 // Write back results
-                for ii_local in 0..TILE {
+                for ii_local in 0..TILE_I {
                     let i = ii + ii_local;
                     let dot = _mm512_reduce_add_ps(accumulators[ii_local]);
                     let c_idx = i + j * ldc;
@@ -152,10 +153,10 @@ pub unsafe fn gemm_bf16(
                 }
             }
             
-            ii += TILE;
+            ii += TILE_I;
         }
         
-        jj += TILE;
+        jj += TILE_J;
     }
 }
 
@@ -176,37 +177,38 @@ pub fn gemm_bf16(
     assert!(m % 4 == 0, "m must be a multiple of 4");
     assert!(n % 4 == 0, "n must be a multiple of 4");
     
-    const TILE: usize = 4;
+    const TILE_I: usize = 4;
+    const TILE_J: usize = 4;
     
     let mut jj = 0;
     while jj < n {
         let mut ii = 0;
         while ii < m {
-            for j in jj..jj + TILE {
-                // Initialize accumulators for the 4 i values in this tile
-                let mut accumulators = [0.0f32; 4];
+            for j in jj..jj + TILE_J {
+                // Initialize accumulators for the TILE_I i values in this tile
+                let mut accumulators = [0.0f32; TILE_I];
                 
                 // Outer loop over k
                 for idx in 0..k {
                     // Inner loop over i in the tile
-                    for ii_local in 0..TILE {
+                    for ii_local in 0..TILE_I {
                         let i = ii + ii_local;
                         accumulators[ii_local] += a[i * lda + idx].to_f32() * b[j * ldb + idx].to_f32();
                     }
                 }
                 
                 // Write back results
-                for ii_local in 0..TILE {
+                for ii_local in 0..TILE_I {
                     let i = ii + ii_local;
                     let c_idx = i + j * ldc;
                     c[c_idx] = alpha * accumulators[ii_local] + beta * c[c_idx];
                 }
             }
             
-            ii += TILE;
+            ii += TILE_I;
         }
         
-        jj += TILE;
+        jj += TILE_J;
     }
 }
 
