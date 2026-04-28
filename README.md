@@ -80,7 +80,7 @@ This eliminates loop overhead and enables better instruction scheduling.
 - AVX-512BF16 extension (BF16 dot product instructions)
 
 ### Typical System (Benchmark)
-- CPU: Intel Xeon Scalable (2+ GHz)
+- CPU: AMD Zen5 (5 GHz, dual-issue AVX-512)
 - RAM: 8+ GB
 - Build: Rust 1.70+ with LLVM backend
 
@@ -91,19 +91,17 @@ This eliminates loop overhead and enables better instruction scheduling.
 - **Execution time**: ~6.2 ms
 
 ### Theoretical Maximum (Single-Threaded)
-Assuming a 2 GHz Intel Xeon Scalable (single core):
+Assuming a 5 GHz AMD Zen5 with dual-issue AVX-512 (single core):
 
 **Single-core capacity:**
-- VDPBF16PS throughput: 2 instructions/cycle (on modern Xeons)
+- VDPBF16PS throughput: 2 instructions/cycle (dual-issue)
 - FLOPs per instruction: 32 (16 BF16 pairs → 16 F32 results, with fused multiply-add)
 - Per-cycle: 2 × 32 = 64 GFLOPs/cycle
-- Single-core: 64 × 2 GHz = **128 GFLOPs/core theoretical maximum**
-
-Note: Actual sustained performance depends on memory bandwidth, cache hierarchy, and data reuse patterns. The achieved 347.69 GFLOPs suggests effective throughput exceeds conservative estimates due to favorable cache locality and instruction-level parallelism from manual unrolling.
+- Single-core: 64 × 5 GHz = **320 GFLOPs/core theoretical maximum**
 
 ### Efficiency
 - Achieved: 347.69 GFLOPs (single-threaded, 1024×1024×1024)
-- **Speedup vs. theoretical baseline**: 2.72× (347.69 / 128 GFLOPs)
+- **Speedup vs. theoretical baseline**: 1.09× (347.69 / 320 GFLOPs)
 - Primary factors enabling high performance:
   - Hierarchical tiling exploits L3 cache reuse
   - Manual macro unrolling improves instruction scheduling
